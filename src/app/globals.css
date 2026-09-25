@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+/*
+  Dark is the default: the tokens on :root are the dark palette, and the light
+  theme is opt-in via the toggle, which stamps data-theme="light" on <html>.
+*/
+@theme {
+  --color-canvas: #0b0b0c;
+  --color-surface: #121214;
+  --color-raised: #17171a;
+  --color-line: #232327;
+  --color-ink: #ececed;
+  --color-muted: #8b8b93;
+  --color-faint: #5e5e66;
+  --color-accent: #8fb89f;
+
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  --radius-card: 0.625rem;
+}
+
+[data-theme="light"] {
+  --color-canvas: #fbfbfa;
+  --color-surface: #ffffff;
+  --color-raised: #f4f4f3;
+  --color-line: #e5e5e2;
+  --color-ink: #17171a;
+  --color-muted: #6b6b73;
+  --color-faint: #9a9aa2;
+  --color-accent: #4c7a5f;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    scrollbar-gutter: stable;
+  }
+  [data-theme="light"] {
+    color-scheme: light;
+  }
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection {
+    background-color: color-mix(in oklab, var(--color-accent) 30%, transparent);
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+  /* A quiet scrollbar — the chrome should never compete with the content. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line) transparent;
+  }
+}
+
+@layer utilities {
+  .line-clamp-2-safe {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+}
+
+/* Thumbnails fade in rather than snapping, which keeps scrolling calm. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-rise {
+  animation: rise 0.28s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}
