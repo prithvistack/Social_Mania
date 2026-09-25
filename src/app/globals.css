@@ -40,6 +40,7 @@
     color-scheme: light;
   }
   body {
+    overflow-x: clip;
     background-color: var(--color-canvas);
     color: var(--color-ink);
     font-family: var(--font-sans);
@@ -68,6 +69,70 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   Watch page layout, and theatre mode.
+
+   The player, the video info and the Related panel are three named grid
+   areas. Theatre mode only swaps the area map and widens the player band —
+   the player element itself never moves in the DOM, so toggling it never
+   reloads the iframe or interrupts playback.
+   --------------------------------------------------------------------------- */
+.watch-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "player" "info" "related";
+  row-gap: 1.5rem;
+}
+.watch-player { grid-area: player; }
+.watch-info { grid-area: info; }
+.watch-related { grid-area: related; margin-top: 1.5rem; }
+
+@media (min-width: 1024px) {
+  .watch-layout {
+    grid-template-columns: minmax(0, 1fr) 320px;
+    /* The second row absorbs any extra height from a tall Related panel.
+       With auto/auto it would be shared, opening a gap under the player. */
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+      "player related"
+      "info   related";
+    column-gap: 2.5rem;
+    align-items: start;
+  }
+  .watch-related { margin-top: 0; }
+
+  [data-theatre] .watch-layout {
+    grid-template-areas:
+      "player player"
+      "info   related";
+  }
+
+  /* A full-bleed black band under the header, like YouTube's. */
+  [data-theatre] .watch-player {
+    margin-inline: calc(50% - 50vw);
+    margin-top: -2rem; /* cancels the page's py-8 so the band meets the header */
+    background: #000;
+  }
+
+  /* As large as fits: full width, but never taller than the viewport leaves
+     room for (header plus a glimpse of the title), so the video is never
+     cropped by the fold. Targets the watch page's own structure rather than
+     a class inside <Player>, so the two can't drift apart. */
+  [data-theatre] .watch-player > * {
+    width: auto;
+    max-width: 100%;
+    height: min(56.25vw, calc(100svh - 56px - 5rem));
+    aspect-ratio: 16 / 9;
+    margin-inline: auto;
+    border-radius: 0;
+    border: 0;
+  }
+}
+
+@media (min-width: 1280px) {
+  .watch-layout { column-gap: 3.5rem; }
 }
 
 /* Thumbnails fade in rather than snapping, which keeps scrolling calm. */

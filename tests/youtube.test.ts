@@ -1,28 +1,39 @@
 import assert from "node:assert/strict";
 import test, { beforeEach } from "node:test";
 import {
-  QuotaMeter,
   YouTubeAuthError,
   YouTubeQuotaError,
-  fetchSubscriptions,
-  fetchUploads,
-  hydrateVideos,
+  createYouTubeClient,
+  detailToVideo,
+  parseDuration,
+  uploadsPlaylistId,
 } from "../src/lib/youtube.ts";
+import { QuotaBudgetError, createQuotaLedger } from "../src/lib/quota.ts";
+import { createFakeDb } from "./helpers/fakeDb.ts";
 
 type Call = { url: URL; headers: Record<string, string> };
 let calls: Call[] = [];
 
-/** Stands in for the YouTube Data API so the client can be exercised offline. */
 function mockApi(routes: Record<string, (url: URL) => unknown>, status = 200) {
-  globalThis.fetch = (async (input: any, init: any) => {
+  return (async (input: any, init: any) => {
     const url = new URL(String(input));
     calls.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
     const endpoint = url.pathname.split("/").pop()!;
     const handler = routes[endpoint];
     if (!handler) throw new Error(`unmocked endpoint: ${endpoint}`);
-    const body = handler(url);
-    return new Response(JSON.stringify(body), { status });
-  }) as any;
+    return new Response(JSON.stringify(handler(url)), { status });
+  }) as typeof fetch;
+}
+
+function harness(routes: Record<string, (url: URL) => unknown>, status = 200, budget = 8000) {
+  const db = createFakeDb();
+  const ledger = createQuotaLedger(db, { budget, reserve: 0 });
+  const client = createYouTubeClient({
+    token: "tok",
+    ledger,
+    fetchImpl: mockApi(routes, status),
+  });
+  return { db, ledger, client };
 }
 
 beforeEach(() => {
@@ -30,108 +41,171 @@ beforeEach(() => {
   delete process.env.YOUTUBE_API_KEY;
 });
 
-const sub = (id: string, title: string) => ({
-  snippet: { title, resourceId: { channelId: id }, thumbnails: { high: { url: `${id}.jpg` } } },
+test("parseDuration handles hours, minutes, seconds", () => {
+  assert.equal(parseDuration("PT1H2M3S"), 3723);
+  assert.equal(parseDuration("PT45S"), 45);
+  assert.equal(parseDuration("P1DT2H"), 93600);
+  assert.equal(parseDuration(undefined), undefined);
 });
 
-test("fetchSubscriptions pages through results and de-duplicates", async () => {
+test("uploads playlist id swaps the UC prefix", () => {
+  assert.equal(uploadsPlaylistId("UCabc123"), "UUabc123");
+});
+
+test("detailToVideo flags sub-minute uploads as Shorts", () => {
+  const short = detailToVideo({ id: "a", contentDetails: { duration: "PT30S" } } as any);
+  const long = detailToVideo({ id: "b", contentDetails: { duration: "PT10M" } } as any);
+  assert.equal(short.isShort, true);
+  assert.equal(long.isShort, false);
+});
+
+test("listSubscriptions pages and de-duplicates, logging one unit per page", async () => {
+  const sub = (id: string, title: string) => ({
+    snippet: { title, resourceId: { channelId: id }, thumbnails: { high: { url: "x" } } },
+  });
   const pages = [
     { items: [sub("UC1", "Beta"), sub("UC2", "Alpha")], nextPageToken: "p2" },
     { items: [sub("UC2", "Alpha"), sub("UC3", "Gamma")] },
   ];
   let n = 0;
-  mockApi({ subscriptions: () => pages[n++] });
+  const { db, client } = harness({ subscriptions: () => pages[n++] });
 
-  const meter = new QuotaMeter();
-  const subs = await fetchSubscriptions("tok", meter);
+  const subs = await client.listSubscriptions();
 
   assert.deepEqual(subs.map((s) => s.title), ["Alpha", "Beta", "Gamma"]);
-  assert.equal(meter.used, 2, "one unit per page");
-  assert.equal(calls[0].url.searchParams.get("mine"), "true");
-  assert.equal(calls[0].url.searchParams.get("maxResults"), "50");
-  assert.equal(calls[1].url.searchParams.get("pageToken"), "p2");
   assert.equal(calls[0].headers.Authorization, "Bearer tok", "subscriptions need OAuth");
+  assert.equal(db.table("quota_log").length, 2, "one ledger row per page");
+  assert.equal(
+    db.table("quota_log").reduce((s, r) => s + r.units, 0),
+    2,
+  );
 });
 
-test("fetchUploads reads the derived uploads playlist", async () => {
-  mockApi({
-    playlistItems: (url) => ({
-      items: [
-        {
-          snippet: {
-            title: "Ep 1",
-            description: "d",
-            channelId: "UCabc",
-            videoOwnerChannelId: "UCabc",
-            videoOwnerChannelTitle: "Chan",
-            channelTitle: "Chan",
-            thumbnails: { medium: { url: "t.jpg" } },
-            resourceId: { videoId: "v1" },
-          },
-          contentDetails: { videoId: "v1", videoPublishedAt: "2026-09-10T00:00:00Z" },
-        },
-      ],
-      _playlist: url.searchParams.get("playlistId"),
-    }),
-  });
-
-  const videos = await fetchUploads({ channelId: "UCabc", title: "Chan", thumbnail: "" }, 10, "tok");
-
-  assert.equal(calls[0].url.searchParams.get("playlistId"), "UUabc", "UC prefix becomes UU");
-  assert.equal(videos.length, 1);
-  assert.equal(videos[0].id, "v1");
-  assert.equal(videos[0].publishedAt, "2026-09-10T00:00:00Z", "uses videoPublishedAt, not playlist add time");
-});
-
-test("hydrateVideos batches ids 50 at a time and fills in detail", async () => {
-  const base = Array.from({ length: 120 }, (_, i) => ({
-    id: `v${i}`, title: `t${i}`, description: "", channelId: "UCa",
-    channelTitle: "A", publishedAt: "2026-09-01T00:00:00Z", thumbnail: "",
-  }));
-
-  mockApi({
+test("listVideos batches 50 ids per call and bills one unit each", async () => {
+  const { db, client } = harness({
     videos: (url) => ({
       items: url.searchParams.get("id")!.split(",").map((id) => ({
         id,
-        snippet: { tags: ["x"], description: "desc" },
-        contentDetails: { duration: id === "v0" ? "PT30S" : "PT10M" },
+        snippet: { title: `t-${id}`, tags: ["x"] },
+        contentDetails: { duration: "PT10M" },
         statistics: { viewCount: "1000", likeCount: "10" },
-        status: { embeddable: id !== "v1" },
+        status: { embeddable: true },
       })),
     }),
   });
 
-  const meter = new QuotaMeter();
-  const out = await hydrateVideos(base, "tok", meter);
+  const ids = Array.from({ length: 120 }, (_, i) => `v${i}`);
+  const out = await client.listVideos(ids);
 
-  assert.equal(meter.used, 3, "120 ids => 3 requests");
-  assert.equal(out[0].isShort, true, "30s upload is flagged as a Short");
-  assert.equal(out[2].isShort, false, "10m upload is not");
-  assert.equal(out[1].embeddable, false, "embeddable flag is carried through");
-  assert.equal(out[0].viewCount, 1000);
-  assert.equal(out[0].durationSeconds, 30);
-  assert.deepEqual(out[0].tags, ["x"]);
+  assert.equal(out.length, 120);
+  assert.equal(calls.length, 3, "120 ids => 3 requests");
+  assert.equal(db.table("quota_log").length, 3);
   for (const call of calls) {
     assert.ok(call.url.searchParams.get("id")!.split(",").length <= 50);
   }
 });
 
-test("an API key is used for public reads instead of the OAuth token", async () => {
-  process.env.YOUTUBE_API_KEY = "KEY123";
-  mockApi({ playlistItems: () => ({ items: [] }) });
+test("search.list is billed at 100 units", async () => {
+  const { db, client } = harness({
+    search: () => ({
+      items: [{ id: { videoId: "abc" }, snippet: { title: "hit", thumbnails: {} } }],
+    }),
+  });
 
-  await fetchUploads({ channelId: "UCabc", title: "C", thumbnail: "" }, 5, "tok");
+  const results = await client.searchVideos("neural networks");
 
-  assert.equal(calls[0].url.searchParams.get("key"), "KEY123");
-  assert.equal(calls[0].headers.Authorization, undefined, "no bearer token leaked alongside the key");
+  assert.equal(results[0].videoId, "abc");
+  const row = db.table("quota_log")[0];
+  assert.equal(row.endpoint, "search.list");
+  assert.equal(row.units, 100);
 });
 
-test("a 401 becomes YouTubeAuthError", async () => {
-  mockApi({ subscriptions: () => ({ error: "bad token" }) }, 401);
-  await assert.rejects(() => fetchSubscriptions("tok"), YouTubeAuthError);
+test("a search is refused rather than blowing the budget", async () => {
+  const db = createFakeDb({
+    quota_log: [{ endpoint: "seed", units: 7950, outcome: "ok", created_at: new Date().toISOString() }],
+  });
+  const ledger = createQuotaLedger(db, { budget: 8000, reserve: 0 });
+  const client = createYouTubeClient({
+    token: "tok",
+    ledger,
+    fetchImpl: mockApi({ search: () => ({ items: [] }) }),
+  });
+
+  await assert.rejects(() => client.searchVideos("anything"), QuotaBudgetError);
+  assert.equal(calls.length, 0, "no HTTP request is made when the budget refuses");
+});
+
+test("getChannelByHandle uses forHandle and costs one unit", async () => {
+  const { db, client } = harness({
+    channels: (url) => ({
+      items: [{
+        id: "UCresolved",
+        snippet: { title: "Resolved", customUrl: "@someone", thumbnails: {} },
+        statistics: { subscriberCount: "1000" },
+      }],
+    }),
+  });
+
+  const channel = await client.getChannelByHandle("someone");
+
+  assert.equal(calls[0].url.searchParams.get("forHandle"), "@someone");
+  assert.equal(channel?.channelId, "UCresolved");
+  assert.equal(channel?.handle, "someone");
+  assert.equal(db.table("quota_log")[0].units, 1);
+});
+
+test("an API key is used for public reads instead of the OAuth token", async () => {
+  process.env.YOUTUBE_API_KEY = "KEY123";
+  const { client } = harness({ videos: () => ({ items: [] }) });
+
+  await client.listVideos(["v1"]);
+
+  assert.equal(calls[0].url.searchParams.get("key"), "KEY123");
+  assert.equal(calls[0].headers.Authorization, undefined, "no bearer token alongside the key");
+});
+
+test("a 401 becomes YouTubeAuthError and is still billed", async () => {
+  const { db, client } = harness({ subscriptions: () => ({ error: "bad token" }) }, 401);
+  await assert.rejects(() => client.listSubscriptions(), YouTubeAuthError);
+  assert.equal(db.table("quota_log")[0].outcome, "error");
 });
 
 test("a quota 403 becomes YouTubeQuotaError", async () => {
-  mockApi({ subscriptions: () => ({ error: { errors: [{ reason: "quotaExceeded" }] } }) }, 403);
-  await assert.rejects(() => fetchSubscriptions("tok"), YouTubeQuotaError);
+  const { client } = harness(
+    { subscriptions: () => ({ error: { errors: [{ reason: "quotaExceeded" }] } }) },
+    403,
+  );
+  await assert.rejects(() => client.listSubscriptions(), YouTubeQuotaError);
+});
+
+test("every client method routes through the ledger", async () => {
+  const { db, client } = harness({
+    subscriptions: () => ({ items: [] }),
+    videos: () => ({ items: [] }),
+    channels: () => ({ items: [] }),
+    playlists: () => ({ items: [] }),
+    playlistItems: () => ({ items: [] }),
+    search: () => ({ items: [] }),
+  });
+
+  await client.listSubscriptions();
+  await client.listVideos(["v1"]);
+  await client.getChannel("UC1");
+  await client.getChannelByHandle("someone");
+  await client.listChannelPlaylists("UC1");
+  await client.listPlaylistItems("PL1");
+  await client.listUploads("UC1");
+  await client.searchVideos("q");
+
+  // Eight calls out, eight ledger rows — nothing reaches googleapis.com
+  // without being counted.
+  assert.equal(calls.length, 8);
+  assert.equal(db.table("quota_log").length, 8);
+  assert.deepEqual(
+    db.table("quota_log").map((r) => r.endpoint),
+    [
+      "subscriptions.list", "videos.list", "channels.list", "channels.list",
+      "playlists.list", "playlistItems.list", "playlistItems.list", "search.list",
+    ],
+  );
 });

@@ -1,30 +1,33 @@
 import { redirect } from "next/navigation";
-import { getAccessToken } from "@/lib/auth";
-import { getFeed } from "@/lib/feed";
-import { YouTubeAuthError, YouTubeQuotaError } from "@/lib/youtube";
+import { getContext, isDbConfigured, isSchemaReady } from "@/lib/context";
+import { getFeedPage } from "@/lib/feed";
+import { YouTubeAuthError } from "@/lib/youtube";
+import { QuotaBudgetError } from "@/lib/quota";
 import { VideoList } from "@/components/VideoList";
-import { FeedStatus } from "@/components/FeedStatus";
+import { ActiveCourses } from "@/components/ActiveCourses";
+import { PageHeading } from "@/components/PageHeading";
 import { Notice } from "@/components/Notice";
+import { SetupNotice } from "@/components/SetupNotice";
+import { timeAgo } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
 export default async function FeedPage() {
-  const token = await getAccessToken();
-  if (!token) redirect("/signin");
+  if (!isDbConfigured() || !(await isSchemaReady())) return <SetupNotice />;
 
-  let result;
+  const ctx = await getContext();
+  if (!ctx) redirect("/signin");
+
+  let page;
   try {
-    result = await getFeed(token);
+    page = await getFeedPage(ctx);
   } catch (err) {
     if (err instanceof YouTubeAuthError) redirect("/signin?error=RefreshFailed");
-    if (err instanceof YouTubeQuotaError) {
+    if (err instanceof QuotaBudgetError) {
       return (
         <div className="py-16">
-          <Notice title="YouTube's daily quota is used up">
-            The feed will work again after the quota resets at midnight Pacific time. Raising{" "}
-            <code className="text-ink">FEED_TTL_SECONDS</code> or lowering{" "}
-            <code className="text-ink">FEED_VIDEOS_PER_CHANNEL</code> will keep this from
-            happening again.
+          <Notice title="Today's API budget is spent">
+            The feed will refresh again after the quota resets at midnight Pacific.
           </Notice>
         </div>
       );
@@ -32,14 +35,15 @@ export default async function FeedPage() {
     throw err;
   }
 
-  const { value: feed, storedAt, fresh } = result;
+  const completed = await ctx.history.completedVideoIds();
+  const courses = await ctx.courses.summaries(completed);
 
-  if (feed.subscriptions.length === 0) {
+  if (page.channels === 0) {
     return (
       <div className="py-16">
         <Notice title="No subscriptions found">
           This Google account doesn&apos;t follow any channels yet, or its subscriptions are
-          set to private. Subscribe to a few channels on YouTube and hit Refresh.
+          private. Subscribe to a few channels on YouTube and hit Refresh.
         </Notice>
       </div>
     );
@@ -47,23 +51,33 @@ export default async function FeedPage() {
 
   return (
     <div className="py-10 sm:py-14">
-      <div className="mb-10 flex flex-col gap-2">
-        <h1 className="text-[22px] font-medium tracking-tight">Latest</h1>
-        <FeedStatus
-          storedAt={storedAt}
-          channels={feed.subscriptions.length}
-          videos={feed.videos.length}
-          stale={!fresh}
-          failedChannels={feed.failedChannels}
-        />
-      </div>
+      <PageHeading
+        title="Latest"
+        meta={
+          <>
+            <span>
+              {page.lastSyncedAt ? `Updated ${timeAgo(page.lastSyncedAt)}` : "Not synced yet"}
+            </span>
+            <span>·</span>
+            <span className="tabular-nums">{page.channels} channels</span>
+            <span>·</span>
+            <span className="tabular-nums">{page.videos.length} videos</span>
+          </>
+        }
+      />
 
-      {feed.videos.length === 0 ? (
-        <Notice title="Nothing to show yet">
-          None of your channels had readable uploads. Try Refresh in a moment.
+      <ActiveCourses courses={courses} />
+
+      {page.videos.length === 0 ? (
+        <Notice title="Nothing cached yet">
+          Hit Refresh to pull your channels&apos; uploads. The first sync takes a moment.
         </Notice>
       ) : (
-        <VideoList videos={feed.videos} />
+        <VideoList
+          videos={page.videos}
+          watchLater={page.watchLater}
+          positions={page.positions}
+        />
       )}
     </div>
   );

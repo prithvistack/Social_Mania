@@ -1,7 +1,13 @@
 import type { Video } from "@/lib/types";
 import { VideoCard } from "./VideoCard";
 
-export function RelatedPanel({ videos }: { videos: Video[] }) {
+export function RelatedPanel({
+  videos,
+  watchLater,
+}: {
+  videos: Video[];
+  watchLater?: Set<string>;
+}) {
   return (
     <aside className="flex flex-col gap-5">
       <div className="flex flex-col gap-1">
@@ -20,7 +26,7 @@ export function RelatedPanel({ videos }: { videos: Video[] }) {
       ) : (
         <div className="flex flex-col gap-5">
           {videos.map((video) => (
-            <VideoCard key={video.id} video={video} compact />
+            <VideoCard key={video.id} video={video} compact savedForLater={watchLater?.has(video.id)} />
           ))}
         </div>
       )}

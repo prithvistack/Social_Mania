@@ -1,14 +1,18 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import type { Metadata } from "next";
-import { getAccessToken } from "@/lib/auth";
-import { getRelatedPool, getVideo } from "@/lib/feed";
+import { getContext, isDbConfigured, isSchemaReady } from "@/lib/context";
+import { getWatchData } from "@/lib/feed";
 import { findRelated } from "@/lib/related";
-import { YouTubeAuthError, YouTubeQuotaError } from "@/lib/youtube";
+import { YouTubeAuthError } from "@/lib/youtube";
+import { QuotaBudgetError } from "@/lib/quota";
 import { Player } from "@/components/Player";
 import { RelatedPanel } from "@/components/RelatedPanel";
+import { WatchLaterButton } from "@/components/WatchLaterButton";
+import { TheatreToggle } from "@/components/TheatreToggle";
 import { Notice } from "@/components/Notice";
-import { compactNumber, exactDate, timeAgo } from "@/lib/format";
+import { SetupNotice } from "@/components/SetupNotice";
+import { compactNumber, exactDate, formatDuration, timeAgo } from "@/lib/format";
 import type { Video } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -17,10 +21,11 @@ type Params = { params: Promise<{ videoId: string }> };
 
 export async function generateMetadata({ params }: Params): Promise<Metadata> {
   const { videoId } = await params;
-  const token = await getAccessToken();
-  if (!token) return { title: "Watch" };
+  if (!isDbConfigured()) return { title: "Watch" };
+  const ctx = await getContext();
+  if (!ctx) return { title: "Watch" };
   try {
-    const video = await getVideo(videoId, token);
+    const video = await ctx.videos.getVideo(videoId);
     return { title: video?.title ?? "Watch" };
   } catch {
     return { title: "Watch" };
@@ -28,20 +33,21 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
 }
 
 export default async function WatchPage({ params }: Params) {
+  if (!isDbConfigured() || !(await isSchemaReady())) return <SetupNotice />;
   const { videoId } = await params;
-  const token = await getAccessToken();
-  if (!token) redirect("/signin");
+  const ctx = await getContext();
+  if (!ctx) redirect("/signin");
 
-  let video;
+  let data;
   try {
-    video = await getVideo(videoId, token);
+    data = await getWatchData(ctx, videoId);
   } catch (err) {
     if (err instanceof YouTubeAuthError) redirect("/signin?error=RefreshFailed");
-    if (err instanceof YouTubeQuotaError) {
+    if (err instanceof QuotaBudgetError) {
       return (
         <div className="py-16">
-          <Notice title="YouTube's daily quota is used up">
-            This video isn&apos;t in the cache and can&apos;t be fetched until the quota resets.
+          <Notice title="Today's API budget is spent">
+            This video isn&apos;t cached and can&apos;t be fetched until the quota resets.
           </Notice>
         </div>
       );
@@ -49,29 +55,46 @@ export default async function WatchPage({ params }: Params) {
     throw err;
   }
 
-  if (!video) notFound();
+  if (!data) notFound();
+  const { video, pool, position, watchLater } = data;
 
-  // Related candidates come from the cached feed, so by construction they can
-  // only be uploads from channels that are already subscribed to.
   let related: Video[] = [];
   try {
-    related = findRelated(video, await getRelatedPool(token), { limit: 12 });
+    related = findRelated(video, pool, { limit: 12 });
   } catch {
-    // A related-videos failure should never block playback.
+    // A related-videos failure must never block playback.
   }
 
   const views = compactNumber(video.viewCount);
   const likes = compactNumber(video.likeCount);
+  const resumeAt = position?.position_seconds ?? 0;
 
   return (
-    <div className="grid grid-cols-1 gap-12 py-8 lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-10 xl:gap-14">
-      <div className="flex min-w-0 flex-col gap-6">
-        <Player videoId={video.id} title={video.title} embeddable={video.embeddable} />
+    // Three named areas so theatre mode can rearrange them with CSS alone —
+    // the player element never moves in the DOM, so playback never restarts.
+    <div className="watch-layout py-8">
+      <div className="watch-player">
+        <Player
+          videoId={video.id}
+          channelId={video.channelId}
+          title={video.title}
+          embeddable={video.embeddable}
+          startAt={resumeAt}
+        />
+      </div>
+
+      <div className="watch-info flex min-w-0 flex-col gap-6">
 
         <div className="flex flex-col gap-3">
           <h1 className="text-[19px] font-medium leading-snug tracking-tight sm:text-[21px]">
             {video.title}
           </h1>
+
+          {resumeAt > 5 && (
+            <p className="text-[12px] text-accent">
+              Resuming from {formatDuration(resumeAt)}
+            </p>
+          )}
 
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[13px] text-muted">
             <Link
@@ -96,14 +119,18 @@ export default async function WatchPage({ params }: Params) {
                 <span className="tabular-nums">{likes} likes</span>
               </>
             )}
-            <a
-              href={`https://www.youtube.com/watch?v=${video.id}`}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="ml-auto text-[12px] text-faint transition-colors hover:text-ink"
-            >
-              Open on YouTube ↗
-            </a>
+            <span className="ml-auto flex items-center gap-2">
+              <TheatreToggle />
+              <WatchLaterButton videoId={video.id} saved={watchLater.has(video.id)} label />
+              <a
+                href={`https://www.youtube.com/watch?v=${video.id}`}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="text-[12px] text-faint transition-colors hover:text-ink"
+              >
+                Open on YouTube ↗
+              </a>
+            </span>
           </div>
         </div>
 
@@ -111,9 +138,7 @@ export default async function WatchPage({ params }: Params) {
           <details className="group rounded-[var(--radius-card)] border border-line bg-surface px-4 py-3.5">
             <summary className="cursor-pointer list-none text-[12px] uppercase tracking-[0.14em] text-faint transition-colors hover:text-muted">
               Description
-              <span className="ml-2 inline-block transition-transform group-open:rotate-90">
-                ›
-              </span>
+              <span className="ml-2 inline-block transition-transform group-open:rotate-90">›</span>
             </summary>
             <p className="mt-3 whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-muted">
               {video.description}
@@ -122,7 +147,9 @@ export default async function WatchPage({ params }: Params) {
         )}
       </div>
 
-      <RelatedPanel videos={related} />
+      <div className="watch-related">
+        <RelatedPanel videos={related} watchLater={watchLater} />
+      </div>
     </div>
   );
 }

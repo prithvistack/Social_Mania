@@ -1,12 +1,14 @@
 import Image from "next/image";
 import { notFound, redirect } from "next/navigation";
 import type { Metadata } from "next";
-import { getAccessToken } from "@/lib/auth";
-import { config, getChannelCatalogue, sortVideos, type SortKey } from "@/lib/feed";
-import { YouTubeAuthError, YouTubeQuotaError } from "@/lib/youtube";
+import { getContext, isDbConfigured, isSchemaReady } from "@/lib/context";
+import { getChannelPage, parseSort, sortVideos } from "@/lib/feed";
+import { YouTubeAuthError } from "@/lib/youtube";
+import { QuotaBudgetError } from "@/lib/quota";
 import { VideoList } from "@/components/VideoList";
 import { SortTabs } from "@/components/SortTabs";
 import { Notice } from "@/components/Notice";
+import { SetupNotice } from "@/components/SetupNotice";
 import { compactNumber } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -16,38 +18,32 @@ type Params = {
   searchParams: Promise<{ sort?: string }>;
 };
 
-const SORTS = new Set<SortKey>(["newest", "views", "likes"]);
-const parseSort = (value: string | undefined): SortKey =>
-  SORTS.has(value as SortKey) ? (value as SortKey) : "newest";
-
 export async function generateMetadata({ params }: Params): Promise<Metadata> {
   const { channelId } = await params;
-  const token = await getAccessToken();
-  if (!token) return { title: "Channel" };
-  try {
-    const { value } = await getChannelCatalogue(channelId, token);
-    return { title: value.channel?.title ?? "Channel" };
-  } catch {
-    return { title: "Channel" };
-  }
+  if (!isDbConfigured()) return { title: "Channel" };
+  const ctx = await getContext();
+  if (!ctx) return { title: "Channel" };
+  const channel = await ctx.videos.getChannel(channelId);
+  return { title: channel?.title ?? "Channel" };
 }
 
 export default async function ChannelPage({ params, searchParams }: Params) {
+  if (!isDbConfigured() || !(await isSchemaReady())) return <SetupNotice />;
   const { channelId } = await params;
   const sort = parseSort((await searchParams).sort);
-  const token = await getAccessToken();
-  if (!token) redirect("/signin");
+  const ctx = await getContext();
+  if (!ctx) redirect("/signin");
 
-  let result;
+  let page;
   try {
-    result = await getChannelCatalogue(channelId, token);
+    page = await getChannelPage(ctx, channelId);
   } catch (err) {
     if (err instanceof YouTubeAuthError) redirect("/signin?error=RefreshFailed");
-    if (err instanceof YouTubeQuotaError) {
+    if (err instanceof QuotaBudgetError) {
       return (
         <div className="py-16">
-          <Notice title="YouTube's daily quota is used up">
-            This channel hasn&apos;t been cached yet. It will load after the quota resets.
+          <Notice title="Today's API budget is spent">
+            This channel isn&apos;t cached yet. It will load after the quota resets.
           </Notice>
         </div>
       );
@@ -55,13 +51,13 @@ export default async function ChannelPage({ params, searchParams }: Params) {
     throw err;
   }
 
-  const { channel, videos } = result.value;
+  const { channel, videos, watchLater } = page;
   if (!channel && videos.length === 0) notFound();
 
   const sorted = sortVideos(videos, sort);
-  const subs = compactNumber(channel?.subscriberCount);
-  const total = compactNumber(channel?.videoCount);
-  const capped = channel?.videoCount !== undefined && channel.videoCount > videos.length;
+  const subs = compactNumber(channel?.subscriber_count ?? undefined);
+  const total = compactNumber(channel?.video_count ?? undefined);
+  const capped = channel?.video_count != null && channel.video_count > videos.length;
 
   return (
     <div className="py-10 sm:py-14">
@@ -83,6 +79,12 @@ export default async function ChannelPage({ params, searchParams }: Params) {
             {subs && <span className="tabular-nums">{subs} subscribers</span>}
             {subs && total && <span className="text-faint">·</span>}
             {total && <span className="tabular-nums">{total} videos</span>}
+            {channel && !channel.is_subscribed && (
+              <>
+                <span className="text-faint">·</span>
+                <span className="text-faint">not subscribed</span>
+              </>
+            )}
           </div>
           {channel?.description && (
             <p className="line-clamp-2-safe max-w-2xl text-[13px] leading-relaxed text-muted">
@@ -96,9 +98,8 @@ export default async function ChannelPage({ params, searchParams }: Params) {
         <SortTabs basePath={`/channel/${channelId}`} active={sort} />
         {capped && (
           <p className="text-[12px] text-faint">
-            Showing the {videos.length} most recent uploads — the cap that keeps one channel
-            page from eating the daily API quota (CHANNEL_CATALOGUE_MAX, currently{" "}
-            {config.CHANNEL_CATALOGUE_MAX}).
+            Showing the {videos.length} uploads cached so far. Sorting by views or likes
+            ranks within these.
           </p>
         )}
       </div>
@@ -108,8 +109,12 @@ export default async function ChannelPage({ params, searchParams }: Params) {
           This channel has nothing readable through the API.
         </Notice>
       ) : (
-        // Date headings only make sense when the list is in date order.
-        <VideoList videos={sorted} showChannel={false} grouped={sort === "newest"} />
+        <VideoList
+          videos={sorted}
+          showChannel={false}
+          grouped={sort === "newest"}
+          watchLater={watchLater}
+        />
       )}
     </div>
   );

@@ -28,9 +28,12 @@ export type ChannelDetail = {
   title: string;
   description: string;
   thumbnail: string;
+  handle?: string;
   banner?: string;
   subscriberCount?: number;
   videoCount?: number;
+  /** Wikipedia topic URLs from topicDetails, used to group discoveries. */
+  topicCategories?: string[];
 };
 
 export type Feed = {

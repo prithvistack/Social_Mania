@@ -1,110 +1,18 @@
 import type { ChannelDetail, Subscription, Video } from "./types";
+import type { QuotaEndpoint, QuotaLedger } from "./quota";
 
 const API = "https://www.googleapis.com/youtube/v3";
 
 /** Thrown when the OAuth token is dead — the UI turns this into "sign in again". */
 export class YouTubeAuthError extends Error {}
-/** Thrown when the project has burned through its 10,000 daily units. */
+/** Thrown when the Google project has burned through its 10,000 daily units. */
 export class YouTubeQuotaError extends Error {}
 
-/**
- * Every call is metered so the app can show what a refresh actually cost.
- * list endpoints are 1 unit per request regardless of how many items come back,
- * which is why everything below batches as hard as it can.
- */
-export class QuotaMeter {
-  used = 0;
-  spend(units = 1) {
-    this.used += units;
-  }
-}
+type Params = Record<string, string | number | boolean | undefined>;
 
-type Params = Record<string, string | number | undefined>;
+// --- pure helpers, shared with the cache layer ------------------------------
 
-async function yt<T>(
-  path: string,
-  params: Params,
-  token: string,
-  meter?: QuotaMeter,
-): Promise<T> {
-  const url = new URL(`${API}/${path}`);
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined) url.searchParams.set(k, String(v));
-  }
-
-  // A plain API key works for public reads and keeps them off the OAuth token.
-  // Quota is billed to the same Cloud project either way.
-  const key = process.env.YOUTUBE_API_KEY;
-  const isPublic = path !== "subscriptions";
-  const headers: Record<string, string> = {};
-  if (isPublic && key) url.searchParams.set("key", key);
-  else headers.Authorization = `Bearer ${token}`;
-
-  const res = await fetch(url, { headers, cache: "no-store" });
-  meter?.spend(1);
-
-  if (!res.ok) {
-    const body = await res.text();
-    if (res.status === 401) {
-      throw new YouTubeAuthError(`YouTube rejected the access token: ${body}`);
-    }
-    if (res.status === 403 && /quota/i.test(body)) {
-      throw new YouTubeQuotaError("Daily YouTube API quota exhausted.");
-    }
-    throw new Error(`YouTube ${path} failed (${res.status}): ${body}`);
-  }
-  return res.json() as Promise<T>;
-}
-
-/** Walks `nextPageToken` until the API runs out of pages or we hit `maxPages`. */
-async function paginate<Item>(
-  path: string,
-  params: Params,
-  token: string,
-  meter: QuotaMeter | undefined,
-  maxPages = 20,
-): Promise<Item[]> {
-  const items: Item[] = [];
-  let pageToken: string | undefined;
-  for (let page = 0; page < maxPages; page++) {
-    const data = await yt<{ items?: Item[]; nextPageToken?: string }>(
-      path,
-      { ...params, pageToken },
-      token,
-      meter,
-    );
-    items.push(...(data.items ?? []));
-    if (!data.nextPageToken) break;
-    pageToken = data.nextPageToken;
-  }
-  return items;
-}
-
-/** Runs `fn` over `items` with a ceiling on in-flight requests. */
-async function mapLimit<In, Out>(
-  items: In[],
-  limit: number,
-  fn: (item: In) => Promise<Out>,
-): Promise<Out[]> {
-  const out = new Array<Out>(items.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (cursor < items.length) {
-      const i = cursor++;
-      out[i] = await fn(items[i]);
-    }
-  });
-  await Promise.all(workers);
-  return out;
-}
-
-function chunk<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
-function bestThumb(thumbs: Record<string, { url: string }> | undefined): string {
+export function bestThumb(thumbs: Record<string, { url: string }> | undefined): string {
   if (!thumbs) return "";
   return (
     thumbs.maxres?.url ??
@@ -123,248 +31,362 @@ export function parseDuration(iso: string | undefined): number | undefined {
   if (!m) return undefined;
   const [, d, h, min, s] = m;
   return (
-    Number(d ?? 0) * 86400 +
-    Number(h ?? 0) * 3600 +
-    Number(min ?? 0) * 60 +
-    Number(s ?? 0)
+    Number(d ?? 0) * 86400 + Number(h ?? 0) * 3600 + Number(min ?? 0) * 60 + Number(s ?? 0)
   );
 }
 
 /**
  * Every channel's uploads live in a playlist whose id is the channel id with
- * the "UC" prefix swapped for "UU". Deriving it saves one channels.list call
- * per channel on every single refresh.
+ * the "UC" prefix swapped for "UU". Only needed on the API fallback path now
+ * that RSS covers the common case.
  */
 export function uploadsPlaylistId(channelId: string): string {
   return `UU${channelId.slice(2)}`;
 }
 
-/** Cost: 1 unit per 50 subscriptions. */
-export async function fetchSubscriptions(
-  token: string,
-  meter?: QuotaMeter,
-): Promise<Subscription[]> {
-  type Item = {
-    snippet: {
-      title: string;
-      resourceId: { channelId: string };
-      thumbnails?: Record<string, { url: string }>;
-    };
-  };
-  const items = await paginate<Item>(
-    "subscriptions",
-    { part: "snippet", mine: "true", maxResults: 50, order: "alphabetical" },
-    token,
-    meter,
-    40,
-  );
-  const seen = new Set<string>();
-  const subs: Subscription[] = [];
-  for (const item of items) {
-    const channelId = item.snippet.resourceId.channelId;
-    if (!channelId || seen.has(channelId)) continue;
-    seen.add(channelId);
-    subs.push({
-      channelId,
-      title: item.snippet.title,
-      thumbnail: bestThumb(item.snippet.thumbnails),
-    });
-  }
-  return subs.sort((a, b) => a.title.localeCompare(b.title));
+export function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
-type PlaylistItem = {
-  snippet: {
-    title: string;
-    description: string;
-    channelId: string;
-    videoOwnerChannelId?: string;
-    videoOwnerChannelTitle?: string;
-    channelTitle: string;
+/** Runs `fn` over `items` with a ceiling on in-flight requests. */
+export async function mapLimit<In, Out>(
+  items: In[],
+  limit: number,
+  fn: (item: In) => Promise<Out>,
+): Promise<Out[]> {
+  const out = new Array<Out>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const i = cursor++;
+      out[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+type VideoDetail = {
+  id: string;
+  snippet?: {
+    title?: string;
+    description?: string;
+    channelId?: string;
+    channelTitle?: string;
+    publishedAt?: string;
+    tags?: string[];
+    categoryId?: string;
     thumbnails?: Record<string, { url: string }>;
-    resourceId: { videoId: string };
   };
-  contentDetails: { videoId: string; videoPublishedAt?: string };
+  contentDetails?: { duration?: string };
+  statistics?: { viewCount?: string; likeCount?: string };
+  status?: { embeddable?: boolean };
+  topicDetails?: { topicCategories?: string[] };
 };
 
-function toVideo(item: PlaylistItem, fallbackChannel?: Subscription): Video {
-  const s = item.snippet;
+export function detailToVideo(item: VideoDetail): Video {
+  const seconds = parseDuration(item.contentDetails?.duration);
   return {
-    id: item.contentDetails.videoId ?? s.resourceId.videoId,
-    title: s.title,
-    description: s.description ?? "",
-    channelId: s.videoOwnerChannelId ?? fallbackChannel?.channelId ?? s.channelId,
-    channelTitle:
-      s.videoOwnerChannelTitle ?? fallbackChannel?.title ?? s.channelTitle,
-    publishedAt: item.contentDetails.videoPublishedAt ?? new Date(0).toISOString(),
-    thumbnail: bestThumb(s.thumbnails),
+    id: item.id,
+    title: item.snippet?.title ?? "",
+    description: item.snippet?.description ?? "",
+    channelId: item.snippet?.channelId ?? "",
+    channelTitle: item.snippet?.channelTitle ?? "",
+    publishedAt: item.snippet?.publishedAt ?? new Date(0).toISOString(),
+    thumbnail: bestThumb(item.snippet?.thumbnails),
+    duration: item.contentDetails?.duration,
+    durationSeconds: seconds,
+    // The API exposes no Shorts flag; sub-minute uploads are the only signal.
+    // Nothing is ever filtered on it — it only drives a badge.
+    isShort: seconds !== undefined && seconds > 0 && seconds <= 60,
+    viewCount: item.statistics?.viewCount ? Number(item.statistics.viewCount) : undefined,
+    likeCount: item.statistics?.likeCount ? Number(item.statistics.likeCount) : undefined,
+    tags: item.snippet?.tags ?? [],
+    embeddable: item.status?.embeddable ?? true,
   };
 }
 
-/** Cost: 1 unit per 50 videos requested. */
-export async function fetchUploads(
-  channel: Subscription,
-  limit: number,
-  token: string,
-  meter?: QuotaMeter,
-): Promise<Video[]> {
-  const items = await paginate<PlaylistItem>(
-    "playlistItems",
-    {
-      part: "snippet,contentDetails",
-      playlistId: uploadsPlaylistId(channel.channelId),
-      maxResults: Math.min(50, limit),
-    },
-    token,
-    meter,
-    Math.ceil(limit / 50),
-  );
-  return items
-    .slice(0, limit)
-    .map((item) => toVideo(item, channel))
-    .filter((v) => Boolean(v.id));
-}
+export type YouTubeClient = ReturnType<typeof createYouTubeClient>;
+
+export type ClientOptions = {
+  token: string;
+  ledger: QuotaLedger;
+  apiKey?: string;
+  fetchImpl?: typeof fetch;
+};
 
 /**
- * Fills in duration, view/like counts, tags and embeddability.
- * Cost: 1 unit per 50 videos — cheap enough to run over the whole feed.
+ * The only path from this app to googleapis.com.
+ *
+ * Every method funnels through `request`, which funnels through
+ * `ledger.spend` — so the quota_log table is a complete record of API usage,
+ * not an estimate, and the daily budget is enforced at the one place it can
+ * actually be enforced.
  */
-export async function hydrateVideos(
-  videos: Video[],
-  token: string,
-  meter?: QuotaMeter,
-): Promise<Video[]> {
-  type Detail = {
-    id: string;
-    snippet?: { tags?: string[]; description?: string };
-    contentDetails?: { duration?: string };
-    statistics?: { viewCount?: string; likeCount?: string };
-    status?: { embeddable?: boolean };
-  };
+export function createYouTubeClient({ token, ledger, apiKey, fetchImpl }: ClientOptions) {
+  const doFetch = fetchImpl ?? fetch;
+  const key = apiKey ?? process.env.YOUTUBE_API_KEY;
 
-  const ids = [...new Set(videos.map((v) => v.id))];
-  const batches = chunk(ids, 50);
-  const results = await mapLimit(batches, 5, (batch) =>
-    yt<{ items?: Detail[] }>(
-      "videos",
-      {
-        part: "contentDetails,statistics,status,snippet",
-        id: batch.join(","),
-        maxResults: 50,
+  async function request<T>(
+    endpoint: QuotaEndpoint,
+    path: string,
+    params: Params,
+    opts: { interactive?: boolean } = {},
+  ): Promise<T> {
+    return ledger.spend(
+      endpoint,
+      async () => {
+        const url = new URL(`${API}/${path}`);
+        for (const [k, v] of Object.entries(params)) {
+          if (v !== undefined) url.searchParams.set(k, String(v));
+        }
+
+        // A plain API key covers public reads; only `subscriptions` needs the
+        // user's OAuth token. Quota is billed to the same project either way.
+        const isPublic = path !== "subscriptions";
+        const headers: Record<string, string> = {};
+        if (isPublic && key) url.searchParams.set("key", key);
+        else headers.Authorization = `Bearer ${token}`;
+
+        const res = await doFetch(url, { headers, cache: "no-store" });
+        if (!res.ok) {
+          const body = await res.text();
+          if (res.status === 401) {
+            throw new YouTubeAuthError(`YouTube rejected the access token: ${body}`);
+          }
+          if (res.status === 403 && /quota/i.test(body)) {
+            throw new YouTubeQuotaError("Daily YouTube API quota exhausted.");
+          }
+          throw new Error(`YouTube ${path} failed (${res.status}): ${body}`);
+        }
+        return res.json() as Promise<T>;
       },
-      token,
-      meter,
-    ),
-  );
+      { interactive: opts.interactive },
+    );
+  }
 
-  const byId = new Map<string, Detail>();
-  for (const r of results) for (const d of r.items ?? []) byId.set(d.id, d);
+  async function paginate<Item>(
+    endpoint: QuotaEndpoint,
+    path: string,
+    params: Params,
+    maxPages: number,
+  ): Promise<Item[]> {
+    const items: Item[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < maxPages; page++) {
+      const data = await request<{ items?: Item[]; nextPageToken?: string }>(
+        endpoint,
+        path,
+        { ...params, pageToken },
+      );
+      items.push(...(data.items ?? []));
+      if (!data.nextPageToken) break;
+      pageToken = data.nextPageToken;
+    }
+    return items;
+  }
 
-  return videos.map((v) => {
-    const d = byId.get(v.id);
-    if (!d) return v;
-    const seconds = parseDuration(d.contentDetails?.duration);
-    return {
-      ...v,
-      duration: d.contentDetails?.duration,
-      durationSeconds: seconds,
-      // The API exposes no Shorts flag. Sub-minute uploads are the reliable
-      // signal; this only drives a badge, nothing is ever filtered out.
-      isShort: seconds !== undefined && seconds > 0 && seconds <= 60,
-      viewCount: d.statistics?.viewCount ? Number(d.statistics.viewCount) : undefined,
-      likeCount: d.statistics?.likeCount ? Number(d.statistics.likeCount) : undefined,
-      tags: d.snippet?.tags,
-      description: d.snippet?.description ?? v.description,
-      embeddable: d.status?.embeddable ?? true,
-    };
-  });
+  return {
+    /** Cost: 1 unit per 50 subscriptions. */
+    async listSubscriptions(): Promise<Subscription[]> {
+      type Item = {
+        snippet: {
+          title: string;
+          resourceId: { channelId: string };
+          thumbnails?: Record<string, { url: string }>;
+        };
+      };
+      const items = await paginate<Item>(
+        "subscriptions.list",
+        "subscriptions",
+        { part: "snippet", mine: "true", maxResults: 50, order: "alphabetical" },
+        40,
+      );
+
+      const seen = new Set<string>();
+      const subs: Subscription[] = [];
+      for (const item of items) {
+        const channelId = item.snippet.resourceId.channelId;
+        if (!channelId || seen.has(channelId)) continue;
+        seen.add(channelId);
+        subs.push({
+          channelId,
+          title: item.snippet.title,
+          thumbnail: bestThumb(item.snippet.thumbnails),
+        });
+      }
+      return subs.sort((a, b) => a.title.localeCompare(b.title));
+    },
+
+    /**
+     * Cost: 1 unit per 50 ids. This is the workhorse — never call it for a
+     * single video when several are pending.
+     */
+    async listVideos(ids: string[]): Promise<Video[]> {
+      const unique = [...new Set(ids)].filter(Boolean);
+      if (unique.length === 0) return [];
+
+      const batches = chunk(unique, 50);
+      const pages = await mapLimit(batches, 4, (batch) =>
+        request<{ items?: VideoDetail[] }>("videos.list", "videos", {
+          part: "contentDetails,statistics,status,snippet,topicDetails",
+          id: batch.join(","),
+          maxResults: 50,
+        }),
+      );
+      return pages.flatMap((p) => (p.items ?? []).map(detailToVideo));
+    },
+
+    /** Cost: 1 unit. */
+    async getChannel(channelId: string): Promise<ChannelDetail | null> {
+      const data = await request<{ items?: any[] }>("channels.list", "channels", {
+        part: "snippet,statistics,brandingSettings,topicDetails",
+        id: channelId,
+      });
+      return toChannelDetail(data.items?.[0]);
+    },
+
+    /**
+     * Resolves an @handle to a channel. Cost: 1 unit — and the caller caches
+     * the answer permanently, including misses, so no handle is ever resolved
+     * twice.
+     */
+    async getChannelByHandle(handle: string): Promise<ChannelDetail | null> {
+      const data = await request<{ items?: any[] }>("channels.list", "channels", {
+        part: "snippet,statistics,brandingSettings,topicDetails",
+        forHandle: handle.startsWith("@") ? handle : `@${handle}`,
+      });
+      return toChannelDetail(data.items?.[0]);
+    },
+
+    /** Cost: 1 unit per 50 playlists. */
+    async listChannelPlaylists(channelId: string, max = 50) {
+      type Item = {
+        id: string;
+        snippet: {
+          title: string;
+          description: string;
+          channelId: string;
+          channelTitle: string;
+          thumbnails?: Record<string, { url: string }>;
+        };
+        contentDetails?: { itemCount?: number };
+      };
+      const items = await paginate<Item>(
+        "playlists.list",
+        "playlists",
+        { part: "snippet,contentDetails", channelId, maxResults: 50 },
+        Math.ceil(max / 50),
+      );
+      return items.slice(0, max).map((p) => ({
+        playlistId: p.id,
+        title: p.snippet.title,
+        description: p.snippet.description ?? "",
+        channelId: p.snippet.channelId,
+        channelTitle: p.snippet.channelTitle,
+        thumbnail: bestThumb(p.snippet.thumbnails),
+        itemCount: p.contentDetails?.itemCount ?? 0,
+      }));
+    },
+
+    /** Cost: 1 unit per 50 items. */
+    async listPlaylistItems(playlistId: string, max = 200) {
+      type Item = {
+        snippet: { title: string; position: number };
+        contentDetails: { videoId: string };
+      };
+      const items = await paginate<Item>(
+        "playlistItems.list",
+        "playlistItems",
+        { part: "snippet,contentDetails", playlistId, maxResults: 50 },
+        Math.ceil(max / 50),
+      );
+      return items.slice(0, max).map((i) => ({
+        videoId: i.contentDetails.videoId,
+        title: i.snippet.title,
+        position: i.snippet.position ?? 0,
+      }));
+    },
+
+    /**
+     * API fallback for a channel whose RSS feed failed, and the only way to
+     * reach further back than the ~15 uploads RSS carries.
+     * Cost: 1 unit per 50 videos.
+     */
+    async listUploads(channelId: string, max = 50) {
+      type Item = {
+        snippet: {
+          title: string;
+          description: string;
+          videoOwnerChannelId?: string;
+          videoOwnerChannelTitle?: string;
+          channelId: string;
+          channelTitle: string;
+          thumbnails?: Record<string, { url: string }>;
+        };
+        contentDetails: { videoId: string; videoPublishedAt?: string };
+      };
+      const items = await paginate<Item>(
+        "playlistItems.list",
+        "playlistItems",
+        {
+          part: "snippet,contentDetails",
+          playlistId: uploadsPlaylistId(channelId),
+          maxResults: 50,
+        },
+        Math.ceil(max / 50),
+      );
+      return items.slice(0, max).map((i) => ({
+        videoId: i.contentDetails.videoId,
+        channelId: i.snippet.videoOwnerChannelId ?? channelId,
+        channelTitle: i.snippet.videoOwnerChannelTitle ?? i.snippet.channelTitle,
+        title: i.snippet.title,
+        description: i.snippet.description ?? "",
+        publishedAt: i.contentDetails.videoPublishedAt ?? new Date(0).toISOString(),
+        thumbnail: bestThumb(i.snippet.thumbnails),
+      }));
+    },
+
+    /**
+     * 100 units a call — by far the most expensive thing here. Never invoked
+     * automatically; only from an explicit "Search all of YouTube" click,
+     * which is why it is flagged interactive and allowed to use the reserve.
+     */
+    async searchVideos(query: string, max = 25) {
+      const data = await request<{ items?: any[] }>(
+        "search.list",
+        "search",
+        { part: "snippet", q: query, type: "video", maxResults: Math.min(50, max) },
+        { interactive: true },
+      );
+      return (data.items ?? []).map((item) => ({
+        videoId: item.id?.videoId as string,
+        title: item.snippet?.title ?? "",
+        description: item.snippet?.description ?? "",
+        channelId: item.snippet?.channelId ?? "",
+        channelTitle: item.snippet?.channelTitle ?? "",
+        publishedAt: item.snippet?.publishedAt ?? "",
+        thumbnail: bestThumb(item.snippet?.thumbnails),
+      })).filter((v) => Boolean(v.videoId));
+    },
+  };
 }
 
-/** Cost: 1 unit. */
-export async function fetchChannel(
-  channelId: string,
-  token: string,
-  meter?: QuotaMeter,
-): Promise<ChannelDetail | null> {
-  type Item = {
-    id: string;
-    snippet: { title: string; description: string; thumbnails?: Record<string, { url: string }> };
-    brandingSettings?: { image?: { bannerExternalUrl?: string } };
-    statistics?: { subscriberCount?: string; videoCount?: string };
-  };
-  const data = await yt<{ items?: Item[] }>(
-    "channels",
-    { part: "snippet,statistics,brandingSettings", id: channelId },
-    token,
-    meter,
-  );
-  const item = data.items?.[0];
+function toChannelDetail(item: any): ChannelDetail | null {
   if (!item) return null;
   return {
     channelId: item.id,
-    title: item.snippet.title,
-    description: item.snippet.description,
-    thumbnail: bestThumb(item.snippet.thumbnails),
+    title: item.snippet?.title ?? "",
+    description: item.snippet?.description ?? "",
+    thumbnail: bestThumb(item.snippet?.thumbnails),
+    handle: item.snippet?.customUrl?.replace(/^@/, "") ?? undefined,
     banner: item.brandingSettings?.image?.bannerExternalUrl,
     subscriberCount: item.statistics?.subscriberCount
       ? Number(item.statistics.subscriberCount)
       : undefined,
     videoCount: item.statistics?.videoCount ? Number(item.statistics.videoCount) : undefined,
-  };
-}
-
-export { mapLimit, chunk };
-
-/**
- * Full detail for one video, used when the watch page is opened for something
- * that isn't in the cached feed (an old upload reached from a channel page).
- * Cost: 1 unit.
- */
-export async function fetchVideoById(
-  id: string,
-  token: string,
-  meter?: QuotaMeter,
-): Promise<Video | null> {
-  type Item = {
-    id: string;
-    snippet: {
-      title: string;
-      description: string;
-      channelId: string;
-      channelTitle: string;
-      publishedAt: string;
-      tags?: string[];
-      thumbnails?: Record<string, { url: string }>;
-    };
-    contentDetails?: { duration?: string };
-    statistics?: { viewCount?: string; likeCount?: string };
-    status?: { embeddable?: boolean };
-  };
-
-  const data = await yt<{ items?: Item[] }>(
-    "videos",
-    { part: "snippet,contentDetails,statistics,status", id },
-    token,
-    meter,
-  );
-  const item = data.items?.[0];
-  if (!item) return null;
-
-  const seconds = parseDuration(item.contentDetails?.duration);
-  return {
-    id: item.id,
-    title: item.snippet.title,
-    description: item.snippet.description ?? "",
-    channelId: item.snippet.channelId,
-    channelTitle: item.snippet.channelTitle,
-    publishedAt: item.snippet.publishedAt,
-    thumbnail: bestThumb(item.snippet.thumbnails),
-    duration: item.contentDetails?.duration,
-    durationSeconds: seconds,
-    isShort: seconds !== undefined && seconds > 0 && seconds <= 60,
-    viewCount: item.statistics?.viewCount ? Number(item.statistics.viewCount) : undefined,
-    likeCount: item.statistics?.likeCount ? Number(item.statistics.likeCount) : undefined,
-    tags: item.snippet.tags,
-    embeddable: item.status?.embeddable ?? true,
+    topicCategories: item.topicDetails?.topicCategories ?? [],
   };
 }

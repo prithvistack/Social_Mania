@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+ <link rel="self" href="http://www.youtube.com/feeds/videos.xml?channel_id=UCYO_jab_esuFRV4b17AJtAw"/>
+ <id>yt:channel:YO_jab_esuFRV4b17AJtAw</id>
+ <yt:channelId>YO_jab_esuFRV4b17AJtAw</yt:channelId>
+ <title>3Blue1Brown</title>
+ <link rel="alternate" href="https://www.youtube.com/channel/UCYO_jab_esuFRV4b17AJtAw"/>
+ <author>
+  <name>3Blue1Brown</name>
+  <uri>https://www.youtube.com/channel/UCYO_jab_esuFRV4b17AJtAw</uri>
+ </author>
+ <published>2015-03-03T23:11:55+00:00</published>
+ <entry>
+  <id>yt:video:ausLKMojXaY</id>
+  <yt:videoId>ausLKMojXaY</yt:videoId>
+  <yt:channelId>UCYO_jab_esuFRV4b17AJtAw</yt:channelId>
+  <title>The Phone Number puzzle</title>
+  <link rel="alternate" href="https://www.youtube.com/shorts/ausLKMojXaY"/>
+  <author>
+   <name>3Blue1Brown</name>
+   <uri>https://www.youtube.com/channel/UCYO_jab_esuFRV4b17AJtAw</uri>
+  </author>
+  <published>2026-09-25T13:35:02+00:00</published>
+  <updated>2026-09-25T13:45:27+00:00</updated>
+  <media:group>
+   <media:title>The Phone Number puzzle</media:title>
+   <media:content url="https://www.youtube.com/v/ausLKMojXaY?version=3" type="application/x-shockwave-flash" width="640" height="390"/>
+   <media:thumbnail url="https://i2.ytimg.com/vi/ausLKMojXaY/hqdefault.jpg" width="480" height="360"/>
+   <media:description>Part of a monthly series of puzzles: https://momath.org/mindbenders/</media:description>
+   <media:community>
+    <media:starRating count="1990" average="5.00" min="1" max="5"/>
+    <media:statistics views="40128"/>
+   </media:community>
+  </media:group>
+ </entry>
+<entry>
+  <id>yt:video:bRQEWPA832A</id>
+  <yt:videoId>bRQEWPA832A</yt:videoId>
+  <yt:channelId>UCYO_jab_esuFRV4b17AJtAw</yt:channelId>
+  <title>The last IMO problem AI could not solve</title>
+  <link rel="alternate" href="https://www.youtube.com/shorts/bRQEWPA832A"/>
+  <author>
+   <name>3Blue1Brown</name>
+   <uri>https://www.youtube.com/channel/UCYO_jab_esuFRV4b17AJtAw</uri>
+  </author>
+  <published>2026-09-18T17:14:08+00:00</published>
+  <updated>2026-09-18T17:14:39+00:00</updated>
+  <media:group>
+   <media:title>The last IMO problem AI could not solve</media:title>
+   <media:content url="https://www.youtube.com/v/bRQEWPA832A?version=3" type="application/x-shockwave-flash" width="640" height="390"/>
+   <media:thumbnail url="https://i3.ytimg.com/vi/bRQEWPA832A/hqdefault.jpg" width="480" height="360"/>
+   <media:description>Full video: https://youtu.be/Nbwv5wHQoj0</media:description>
+   <media:community>
+    <media:starRating count="21687" average="5.00" min="1" max="5"/>
+    <media:statistics views="625278"/>
+   </media:community>
+  </media:group>
+ </entry>
+</feed>

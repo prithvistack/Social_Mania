@@ -14,11 +14,13 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
-// Runs before first paint so a light-theme user never sees a dark flash.
+// Runs before first paint so neither the theme nor theatre mode flashes
+// in the wrong state on load.
 const THEME_BOOTSTRAP = `
 try {
   var t = localStorage.getItem('quiet-theme');
   if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+  if (localStorage.getItem('quiet-theatre') === '1') document.documentElement.setAttribute('data-theatre', '');
 } catch (e) {}
 `;
 

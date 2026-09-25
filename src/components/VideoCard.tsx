@@ -2,15 +2,19 @@ import Image from "next/image";
 import Link from "next/link";
 import type { Video } from "@/lib/types";
 import { compactNumber, exactDate, formatDuration, timeAgo } from "@/lib/format";
+import { WatchLaterButton } from "./WatchLaterButton";
 
 export function Thumbnail({
   video,
   className = "",
   sizes = "(max-width: 640px) 100vw, 224px",
+  progress,
 }: {
   video: Video;
   className?: string;
   sizes?: string;
+  /** 0-1, drawn as a thin resume bar along the bottom. */
+  progress?: number;
 }) {
   const duration = formatDuration(video.durationSeconds);
   return (
@@ -31,26 +35,47 @@ export function Thumbnail({
           {duration}
         </span>
       )}
+      {progress !== undefined && progress > 0.01 && (
+        <span className="absolute inset-x-0 bottom-0 h-[3px] bg-black/40">
+          <span
+            className="block h-full bg-accent"
+            style={{ width: `${Math.min(100, progress * 100)}%` }}
+          />
+        </span>
+      )}
     </div>
   );
 }
 
 type Props = {
   video: Video;
-  /** Hidden on a channel page, where every row is the same channel. */
   showChannel?: boolean;
   compact?: boolean;
+  /** Resume point in seconds, if any. */
+  resumeAt?: number;
+  savedForLater?: boolean;
+  showSave?: boolean;
 };
 
-export function VideoCard({ video, showChannel = true, compact = false }: Props) {
+export function VideoCard({
+  video,
+  showChannel = true,
+  compact = false,
+  resumeAt,
+  savedForLater = false,
+  showSave = true,
+}: Props) {
   const views = compactNumber(video.viewCount);
   const likes = compactNumber(video.likeCount);
+  const progress =
+    resumeAt && video.durationSeconds ? resumeAt / video.durationSeconds : undefined;
+  const href = `/watch/${video.id}`;
 
   return (
     <article className="group animate-rise">
       <div className={`flex gap-4 ${compact ? "sm:gap-3" : "sm:gap-5"}`}>
         <Link
-          href={`/watch/${video.id}`}
+          href={href}
           tabIndex={-1}
           aria-hidden
           className={
@@ -63,24 +88,30 @@ export function VideoCard({ video, showChannel = true, compact = false }: Props)
             video={video}
             className="h-full w-full"
             sizes={compact ? "168px" : "(max-width: 640px) 45vw, 240px"}
+            progress={progress}
           />
         </Link>
 
-        <div className="flex min-w-0 flex-col justify-start gap-1.5 py-0.5">
-          <h3
-            className={
-              compact
-                ? "text-[13.5px] font-medium leading-snug"
-                : "text-[15px] font-medium leading-snug sm:text-base"
-            }
-          >
-            <Link
-              href={`/watch/${video.id}`}
-              className="line-clamp-2-safe decoration-faint underline-offset-4 transition-colors hover:text-accent"
+        <div className="flex min-w-0 flex-1 flex-col justify-start gap-1.5 py-0.5">
+          <div className="flex items-start gap-2">
+            <h3
+              className={
+                compact
+                  ? "min-w-0 flex-1 text-[13.5px] font-medium leading-snug"
+                  : "min-w-0 flex-1 text-[15px] font-medium leading-snug sm:text-base"
+              }
             >
-              {video.title}
-            </Link>
-          </h3>
+              <Link
+                href={href}
+                className="line-clamp-2-safe decoration-faint underline-offset-4 transition-colors hover:text-accent"
+              >
+                {video.title}
+              </Link>
+            </h3>
+            {showSave && !compact && (
+              <WatchLaterButton videoId={video.id} saved={savedForLater} />
+            )}
+          </div>
 
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-muted">
             {showChannel && (
@@ -113,6 +144,12 @@ export function VideoCard({ video, showChannel = true, compact = false }: Props)
               <span className="rounded border border-line px-1.5 py-px text-[10.5px] uppercase tracking-wide text-faint">
                 Short
               </span>
+            )}
+            {progress !== undefined && progress > 0.01 && (
+              <>
+                <Dot />
+                <span className="text-accent">Resume</span>
+              </>
             )}
           </div>
         </div>
