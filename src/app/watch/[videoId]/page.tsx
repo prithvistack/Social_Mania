@@ -9,7 +9,6 @@ import { QuotaBudgetError } from "@/lib/quota";
 import { Player } from "@/components/Player";
 import { RelatedPanel } from "@/components/RelatedPanel";
 import { WatchLaterButton } from "@/components/WatchLaterButton";
-import { TheatreToggle } from "@/components/TheatreToggle";
 import { Notice } from "@/components/Notice";
 import { SetupNotice } from "@/components/SetupNotice";
 import { compactNumber, exactDate, formatDuration, timeAgo } from "@/lib/format";
@@ -120,7 +119,6 @@ export default async function WatchPage({ params }: Params) {
               </>
             )}
             <span className="ml-auto flex items-center gap-2">
-              <TheatreToggle />
               <WatchLaterButton videoId={video.id} saved={watchLater.has(video.id)} label />
               <a
                 href={`https://www.youtube.com/watch?v=${video.id}`}

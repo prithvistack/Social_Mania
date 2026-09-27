@@ -135,6 +135,54 @@
   .watch-layout { column-gap: 3.5rem; }
 }
 
+/* ---------------------------------------------------------------------------
+   Player controls
+   --------------------------------------------------------------------------- */
+
+/* Our container, not YouTube's iframe, is what goes fullscreen, so the control
+   bar survives it. It must fill the screen whatever the theatre sizing says. */
+.player-frame:fullscreen,
+[data-theatre] .watch-player > .player-frame:fullscreen {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  aspect-ratio: auto;
+  border-radius: 0;
+  background: #000;
+}
+
+/* Shortcut feedback ("+10s", "65%") fades out on its own. */
+@keyframes player-flash {
+  0%   { opacity: 0; transform: translate(-50%, 4px); }
+  15%  { opacity: 1; transform: translate(-50%, 0); }
+  70%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+.player-flash { animation: player-flash 0.9s ease-out forwards; }
+
+/* Volume slider: a thin white track filled to the current level. */
+.player-volume {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 9999px;
+  background: linear-gradient(to right, #fff var(--vol, 100%), rgb(255 255 255 / 0.3) var(--vol, 100%));
+}
+.player-volume::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  background: #fff;
+}
+.player-volume::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 9999px;
+  background: #fff;
+}
+
 /* Thumbnails fade in rather than snapping, which keeps scrolling calm. */
 @keyframes rise {
   from {
