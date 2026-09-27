@@ -141,6 +141,20 @@ export function createHistoryRepo(db: DbLike, now: () => Date = () => new Date()
       return (data as PlaybackPositionRow) ?? null;
     },
 
+    /**
+     * Every resume point. The table only holds unfinished videos, so it stays
+     * small, and fetching it whole lets callers run this in parallel instead
+     * of waiting for a list of ids first.
+     */
+    async allPositions(): Promise<Map<string, number>> {
+      const { data } = await db
+        .from("playback_positions")
+        .select("video_id,position_seconds");
+      return new Map(
+        (data ?? []).map((r: PlaybackPositionRow) => [r.video_id, r.position_seconds]),
+      );
+    },
+
     async getPositions(videoIds: string[]): Promise<Map<string, number>> {
       if (videoIds.length === 0) return new Map();
       const { data } = await db

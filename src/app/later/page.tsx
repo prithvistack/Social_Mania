@@ -15,12 +15,14 @@ export default async function LaterPage() {
   if (!ctx) redirect("/signin");
 
   // Everything here is already cached, so the queue costs no quota at all.
-  const queue = await ctx.watchLater.list();
-  const videos = await ctx.videos.getVideos(queue.map((q) => q.video_id));
+  const [queue, positions] = await Promise.all([
+    ctx.watchLater.list(),
+    ctx.history.allPositions(),
+  ]);
+  const videos = await ctx.videos.getVideos(queue.map((q) => q.video_id), { lean: true });
   const order = new Map(queue.map((q, i) => [q.video_id, i]));
   videos.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 
-  const positions = await ctx.history.getPositions(videos.map((v) => v.id));
   const saved = new Set(videos.map((v) => v.id));
 
   return (

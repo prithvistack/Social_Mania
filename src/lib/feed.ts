@@ -5,6 +5,7 @@ import { SYNC_STATE_KEY, syncFeed, type SyncResult } from "./sync";
 import { QuotaBudgetError } from "./quota";
 import type { AppContext } from "./context";
 import type { Video } from "./types";
+import type { CourseSummary } from "./db/courses";
 
 const num = (v: string | undefined, fallback: number) => {
   const n = Number(v);
@@ -38,31 +39,45 @@ export function sortVideos(videos: Video[], key: SortKey): Video[] {
  * there is a feed, a stale cache is refreshed by `after()` — the response goes
  * out immediately and the sync runs once it has been sent.
  */
+function scheduleBackgroundSync(ctx: AppContext) {
+  after(async () => {
+    try {
+      await syncFeed(ctx);
+    } catch (err) {
+      if (!(err instanceof QuotaBudgetError)) {
+        console.error("Background feed sync failed:", err);
+      }
+    }
+  });
+}
+
+/**
+ * Keeps the cache warm without ever making the reader wait for YouTube.
+ *
+ * On a cold cache there is nothing to show, so the sync runs inline. Once
+ * there is a feed, a stale cache is refreshed by `after()` — the response goes
+ * out immediately and the sync runs once it has been sent.
+ */
 export async function ensureFeedFresh(ctx: AppContext): Promise<{
   cold: boolean;
   result?: SyncResult;
 }> {
-  const stale = await ctx.state.isStale(SYNC_STATE_KEY, FEED_TTL_SECONDS * 1000);
-  const cached = await ctx.videos.count();
+  const [syncState, cached] = await Promise.all([
+    ctx.state.get<{ at?: string }>(SYNC_STATE_KEY),
+    ctx.videos.count(),
+  ]);
 
   if (cached === 0) {
     const result = await syncFeed(ctx);
     return { cold: true, result };
   }
-
-  if (stale) {
-    after(async () => {
-      try {
-        await syncFeed(ctx);
-      } catch (err) {
-        if (!(err instanceof QuotaBudgetError)) {
-          console.error("Background feed sync failed:", err);
-        }
-      }
-    });
-  }
-
+  if (isSyncStale(syncState)) scheduleBackgroundSync(ctx);
   return { cold: false };
+}
+
+function isSyncStale(state: { at?: string } | null): boolean {
+  if (!state?.at) return true;
+  return Date.now() - new Date(state.at).getTime() > FEED_TTL_SECONDS * 1000;
 }
 
 export type FeedPage = {
@@ -71,25 +86,52 @@ export type FeedPage = {
   lastSyncedAt: string | null;
   watchLater: Set<string>;
   positions: Map<string, number>;
+  courses: CourseSummary[];
 };
 
+/**
+ * Everything the home page needs in two parallel waves of queries.
+ *
+ * The functions run in Mumbai beside the database, but every *sequential*
+ * query is still a round trip the reader waits on, so nothing here waits on
+ * anything it doesn't actually depend on.
+ */
 export async function getFeedPage(ctx: AppContext): Promise<FeedPage> {
-  await ensureFeedFresh(ctx);
-
-  const videos = await ctx.videos.feed(FEED_LIMIT);
-  const [channels, syncState, watchLater, positions] = await Promise.all([
-    ctx.videos.subscribedChannels(),
+  // Wave 1: none of these depend on each other.
+  const [syncState, cached, channels, watchLater, positions, completed] = await Promise.all([
     ctx.state.get<{ at?: string }>(SYNC_STATE_KEY),
+    ctx.videos.count(),
+    ctx.videos.subscribedChannels(),
     ctx.watchLater.ids(),
-    ctx.history.getPositions(videos.map((v) => v.id)),
+    ctx.history.allPositions(),
+    ctx.history.completedVideoIds(),
+  ]);
+
+  let channelIds = channels.map((c) => c.channel_id);
+  let lastSyncedAt = syncState?.at ?? null;
+
+  if (cached === 0) {
+    // First ever visit: nothing to show until the feed is pulled.
+    await syncFeed(ctx);
+    channelIds = (await ctx.videos.subscribedChannels()).map((c) => c.channel_id);
+    lastSyncedAt = new Date().toISOString();
+  } else if (isSyncStale(syncState)) {
+    scheduleBackgroundSync(ctx);
+  }
+
+  // Wave 2: the feed needs the channel list; courses need completed ids.
+  const [videos, courses] = await Promise.all([
+    ctx.videos.feed(FEED_LIMIT, { channelIds, lean: true }),
+    ctx.courses.summaries(completed),
   ]);
 
   return {
     videos,
-    channels: channels.length,
-    lastSyncedAt: syncState?.at ?? null,
+    channels: channelIds.length,
+    lastSyncedAt,
     watchLater,
     positions,
+    courses,
   };
 }
 

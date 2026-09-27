@@ -18,7 +18,9 @@ export default async function HistoryPage() {
   if (!ctx) redirect("/signin");
 
   const rows = await ctx.history.list(300);
-  const videos = await ctx.videos.getVideos([...new Set(rows.map((r) => r.video_id))]);
+  const videos = await ctx.videos.getVideos([...new Set(rows.map((r) => r.video_id))], {
+    lean: true,
+  });
   const byId = new Map(videos.map((v) => [v.id, v]));
 
   const groups: { label: string; rows: typeof rows }[] = [];

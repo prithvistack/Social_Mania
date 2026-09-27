@@ -17,9 +17,11 @@ export default async function SettingsPage() {
   if (!ctx) redirect("/signin");
 
   const session = await auth();
-  const status = await ctx.ledger.status();
-  const videoCount = await ctx.videos.count();
-  const channels = await ctx.videos.subscribedChannels();
+  const [status, videoCount, channels] = await Promise.all([
+    ctx.ledger.status(),
+    ctx.videos.count(),
+    ctx.videos.subscribedChannels(),
+  ]);
 
   return (
     <div className="py-10 sm:py-14">

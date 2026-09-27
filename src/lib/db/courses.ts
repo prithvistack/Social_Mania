@@ -103,12 +103,21 @@ export function createCourseRepo(db: DbLike, now: () => Date = () => new Date())
      */
     async summaries(completedVideoIds: Set<string>): Promise<CourseSummary[]> {
       const enrolled = await this.enrollments();
-      const out: CourseSummary[] = [];
+      // Each course's playlist and lectures load in parallel, not one after
+      // another — every sequential query is a full database round trip.
+      const loaded = await Promise.all(
+        enrolled.map(async (row) => {
+          const [playlist, items] = await Promise.all([
+            this.getPlaylist(row.playlist_id),
+            this.playlistItems(row.playlist_id),
+          ]);
+          return { row, playlist, items };
+        }),
+      );
 
-      for (const row of enrolled) {
-        const playlist = await this.getPlaylist(row.playlist_id);
+      const out: CourseSummary[] = [];
+      for (const { row, playlist, items } of loaded) {
         if (!playlist) continue;
-        const items = await this.playlistItems(row.playlist_id);
         const next = items.find((i) => !completedVideoIds.has(i.video_id)) ?? null;
 
         out.push({

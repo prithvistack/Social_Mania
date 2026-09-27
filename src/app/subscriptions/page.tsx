@@ -15,13 +15,12 @@ export default async function SubscriptionsPage() {
   const ctx = await getContext();
   if (!ctx) redirect("/signin");
 
-  const channels = await ctx.videos.subscribedChannels();
-  const feed = await ctx.videos.feed(600);
-
-  const latest = new Map<string, string>();
-  for (const video of feed) {
-    if (!latest.has(video.channelId)) latest.set(video.channelId, video.publishedAt);
-  }
+  // Both in parallel, and only two columns for the dates — this page used
+  // to download the whole feed, descriptions included, to find them.
+  const [channels, latest] = await Promise.all([
+    ctx.videos.subscribedChannels(),
+    ctx.videos.latestUploadByChannel(),
+  ]);
 
   return (
     <div className="py-10 sm:py-14">

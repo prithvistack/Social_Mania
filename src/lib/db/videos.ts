@@ -7,11 +7,20 @@ export const VIDEO_STATS_TTL_HOURS = 24;
 /** Channel metadata barely changes; a week is plenty. */
 export const CHANNEL_TTL_DAYS = 7;
 
+/**
+ * What a list needs to draw a video card. Descriptions are left out on
+ * purpose: they are most of each row's size, and a feed of a few hundred
+ * videos was sending ~600 KB of text no list ever shows.
+ */
+export const LIST_COLUMNS =
+  "id,channel_id,channel_title,title,published_at,thumbnail,duration_seconds,is_short,view_count,like_count,embeddable";
+
 export function rowToVideo(row: VideoRow): Video {
   return {
     id: row.id,
     title: row.title,
-    description: row.description,
+    // Absent when the row was fetched with LIST_COLUMNS.
+    description: row.description ?? "",
     channelId: row.channel_id,
     channelTitle: row.channel_title,
     publishedAt: row.published_at,
@@ -20,7 +29,7 @@ export function rowToVideo(row: VideoRow): Video {
     isShort: row.is_short,
     viewCount: row.view_count ?? undefined,
     likeCount: row.like_count ?? undefined,
-    tags: row.tags,
+    tags: row.tags ?? [],
     embeddable: row.embeddable,
   };
 }
@@ -174,32 +183,45 @@ export function createVideoRepo(db: DbLike, now: () => Date = () => new Date()) 
       return data ? rowToVideo(data as VideoRow) : null;
     },
 
-    async getVideos(ids: string[]): Promise<Video[]> {
+    async getVideos(ids: string[], opts: { lean?: boolean } = {}): Promise<Video[]> {
       if (ids.length === 0) return [];
-      const out: Video[] = [];
-      for (const batch of chunk(ids, 300)) {
-        const { data } = await db.from("videos").select("*").in("id", batch);
-        out.push(...(data ?? []).map((r: VideoRow) => rowToVideo(r)));
-      }
-      return out;
+      const batches = await Promise.all(
+        chunk(ids, 300).map((batch) =>
+          db.from("videos").select(opts.lean ? LIST_COLUMNS : "*").in("id", batch),
+        ),
+      );
+      return batches.flatMap(({ data }: any) =>
+        (data ?? []).map((r: VideoRow) => rowToVideo(r)),
+      );
     },
 
     /** The reverse-chronological feed, straight from cache. Zero quota. */
-    async feed(limit = 300): Promise<Video[]> {
-      const channels = await this.subscribedChannels();
-      const ids = channels.map((c) => c.channel_id);
+    /**
+     * The feed, newest first. Pass `channelIds` when the caller already has
+     * the subscription list, to save a round trip, and `lean` for lists that
+     * don't need descriptions or tags.
+     */
+    async feed(
+      limit = 300,
+      opts: { channelIds?: string[]; lean?: boolean } = {},
+    ): Promise<Video[]> {
+      const ids =
+        opts.channelIds ?? (await this.subscribedChannels()).map((c) => c.channel_id);
       if (ids.length === 0) return [];
 
-      const out: Video[] = [];
-      for (const batch of chunk(ids, 100)) {
-        const { data } = await db
-          .from("videos")
-          .select("*")
-          .in("channel_id", batch)
-          .order("published_at", { ascending: false })
-          .limit(limit);
-        out.push(...(data ?? []).map((r: VideoRow) => rowToVideo(r)));
-      }
+      const batches = await Promise.all(
+        chunk(ids, 100).map((batch) =>
+          db
+            .from("videos")
+            .select(opts.lean ? LIST_COLUMNS : "*")
+            .in("channel_id", batch)
+            .order("published_at", { ascending: false })
+            .limit(limit),
+        ),
+      );
+      const out: Video[] = batches.flatMap(({ data }: any) =>
+        (data ?? []).map((r: VideoRow) => rowToVideo(r)),
+      );
       out.sort(
         (a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime(),
       );
@@ -240,9 +262,24 @@ export function createVideoRepo(db: DbLike, now: () => Date = () => new Date()) 
       return (data ?? []).map((r: VideoRow) => rowToVideo(r));
     },
 
+    /** Row count only. `head` stops PostgREST sending every id back. */
     async count(): Promise<number> {
-      const { count } = await db.from("videos").select("id", { count: "exact" });
+      const { count } = await db.from("videos").select("id", { count: "exact", head: true });
       return count ?? 0;
+    },
+
+    /** Most recent upload per channel, for the Channels page. Two columns only. */
+    async latestUploadByChannel(channelIds?: string[]): Promise<Map<string, string>> {
+      const latest = new Map<string, string>();
+      if (channelIds && channelIds.length === 0) return latest;
+      // Without ids this can run in parallel with the channel list itself.
+      let query = db.from("videos").select("channel_id,published_at");
+      if (channelIds) query = query.in("channel_id", channelIds);
+      const { data } = await query.order("published_at", { ascending: false }).limit(2000);
+      for (const row of data ?? []) {
+        if (!latest.has(row.channel_id)) latest.set(row.channel_id, row.published_at);
+      }
+      return latest;
     },
   };
 }

@@ -35,9 +35,6 @@ export default async function FeedPage() {
     throw err;
   }
 
-  const completed = await ctx.history.completedVideoIds();
-  const courses = await ctx.courses.summaries(completed);
-
   if (page.channels === 0) {
     return (
       <div className="py-16">
@@ -66,7 +63,7 @@ export default async function FeedPage() {
         }
       />
 
-      <ActiveCourses courses={courses} />
+      <ActiveCourses courses={page.courses} />
 
       {page.videos.length === 0 ? (
         <Notice title="Nothing cached yet">

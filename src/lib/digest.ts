@@ -26,6 +26,12 @@ export async function buildDigest(ctx: AppContext, days = 7): Promise<Digest> {
   const from = new Date(now - days * 86_400_000);
   const previousFrom = new Date(now - 2 * days * 86_400_000);
 
+  // The courses chain doesn't depend on this week's history, so it runs
+  // alongside it instead of after it.
+  const coursesPromise = ctx.history
+    .completedVideoIds()
+    .then((completed) => ctx.courses.summaries(completed));
+
   const recent = await ctx.history.since(previousFrom.toISOString());
   const thisWeek = recent.filter((h) => new Date(h.watched_at) >= from);
   const lastWeek = recent.filter((h) => new Date(h.watched_at) < from);
@@ -67,8 +73,7 @@ export async function buildDigest(ctx: AppContext, days = 7): Promise<Digest> {
     })),
   );
 
-  const completed = await ctx.history.completedVideoIds();
-  const courses = await ctx.courses.summaries(completed);
+  const courses = await coursesPromise;
 
   return {
     from: from.toISOString(),
